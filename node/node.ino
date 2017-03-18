@@ -25,8 +25,20 @@
 #include <ESP8266WebServer.h>
 #include <ESP8266mDNS.h>
 
+#include <DHT.h>
+
 // Controll LED
 const int led = 5;
+
+// SENSOR
+#define DHTPIN 2
+#define DHTTYPE DHT22
+DHT dht(DHTPIN, DHTTYPE, 30);
+
+volatile float h;
+volatile float t;
+char str_hum[6];
+char str_temp[6];
 
 // Storage EEPROM Adress
 int eepromNameAddress = 0;
@@ -34,7 +46,7 @@ byte value;
 
 // Timer
 os_timer_t myTimer;
-bool tickOccured;
+volatile bool tickOccured;
 
 // POST
 String remote_posthost;
@@ -60,10 +72,31 @@ void timerCallback(void *pArg) {
     tickOccured = true;
 }
 
+
+// float to string
+// =======================================================================================
+void ICACHE_FLASH_ATTR printFloat(float val, char *buff) {
+   char smallBuff[16];
+   int val1 = (int) val;
+   unsigned int val2;
+   if (val < 0) {
+      val2 = (int) (-100.0 * val) % 100;
+   } else {
+      val2 = (int) (100.0 * val) % 100;
+   }
+   if (val2 < 10) {
+      os_sprintf(smallBuff, "%i.0%u", val1, val2);
+   } else {
+      os_sprintf(smallBuff, "%i.%u", val1, val2);
+   }
+
+   strcat(buff, smallBuff);
+}
+
 // ROUTE to /
 // =======================================================================================
 void handleRoot() {
-    digitalWrite ( led, 1 );
+    //digitalWrite ( led, 1 );
     char temp[400];
     int sec = millis() / 1000;
     int min = sec / 60;
@@ -73,18 +106,20 @@ void handleRoot() {
 "{ \
   \"title\": \"%s\", \
   \"uptime\": \"%02d:%02d:%02d\", \
-  \"mac\": \"%s\" \
+  \"mac\": \"%s\", \
+  \"hum\": \"%s\%\", \
+  \"temp\": \"%sC\" \
 }",
-    WiFi.hostname().c_str(), hr, min % 60, sec % 60, WiFi.macAddress().c_str()
+    WiFi.hostname().c_str(), hr, min % 60, sec % 60, WiFi.macAddress().c_str(), str_hum, str_temp
     );
     server.send ( 200, "application/json", temp );
-    digitalWrite ( led, 0 );
+    //digitalWrite ( led, 0 );
 }
 
 // ROUTE to /set
 // =======================================================================================
 void setPreferences(){
-    digitalWrite ( led, 1 );
+    //digitalWrite ( led, 1 );
     char temp[400];
     String hostname = server.arg("hostname");
     String posturl = server.arg("posturl");
@@ -137,7 +172,7 @@ void setPreferences(){
     WiFi.hostname().c_str(), remote_posturl.c_str(), remote_posthost.c_str(), remote_postport.c_str()
     );
     server.send ( 200, "application/json", temp );
-    digitalWrite ( led, 0 );
+    //digitalWrite ( led, 0 );
     // Reboot
     ESP.reset();
     delay(1000);
@@ -146,7 +181,7 @@ void setPreferences(){
 // 404
 // =======================================================================================  
 void handleNotFound() {
-    digitalWrite ( led, 1 );
+    //digitalWrite ( led, 1 );
     String message = "File Not Found\n\n";
     message += "URI: ";
     message += server.uri();
@@ -159,17 +194,17 @@ void handleNotFound() {
         message += " " + server.argName ( i ) + ": " + server.arg ( i ) + "\n";
     }
     server.send ( 404, "text/plain", message );
-    digitalWrite ( led, 0 );
+    //digitalWrite ( led, 0 );
 }
 
 // System Setup
 // ======================================================================================= 
 void setup() {
     Serial.begin(115200);
-    pinMode ( led, OUTPUT );
-
+    // pinMode ( led, OUTPUT );
+    
     EEPROM.begin(4096);
-  
+    
     // Hostname
     String hostname = "";
     for (int i = 32; i < 96; ++i) {
@@ -233,12 +268,12 @@ void setup() {
     server.on ( "/", handleRoot );
     
     server.on ( "/on", []() {
-        digitalWrite ( led, 1 );
+        //digitalWrite ( led, 1 );
         server.send(200, "application/json", "{\"led\": true}");
     });
     
     server.on ( "/off", []() {
-        digitalWrite ( led, 0 );
+        //digitalWrite ( led, 0 );
         server.send(200, "application/json", "{\"led\": false}");
     });
     
@@ -260,26 +295,57 @@ void setup() {
     
     server.begin();
     Serial.println ( "HTTP server started" );
+
+    // Start Sensor
+    dht.begin();
+    Serial.println( "Sensor started." );
+    
     tickOccured = true;
 }
 
 // MAINLOOP
 // ======================================================================================= 
 void loop() {
+
     server.handleClient();
     if (tickOccured == true) {
-        digitalWrite ( led, 1 );
-        char temp[400];
+
+      //digitalWrite ( led, 1 );
+      h = dht.readHumidity();
+      t = dht.readTemperature();
+      int count = 0;
+      while(isnan(h) || isnan(t)){
+        delay(2000);
+        t = dht.readTemperature();
+        h = dht.readHumidity();
+        count++;
+        if(count > 20){
+          break;
+        }
+      }
+      if (isnan(h) || isnan(t)) {
+        Serial.println("Failed to read from DHT sensor!");
+        h = 0;
+        t = 0;
+      }
+
+      memset(str_hum, 0, strlen(str_hum));
+      memset(str_temp, 0, strlen(str_temp));
+      printFloat(h, str_hum);
+      printFloat(t, str_temp);
+      
+        char temp[50];
         int sec = millis() / 1000;
         int min = sec / 60;
         int hr = min / 60;
-        snprintf ( temp, 400, "%02d:%02d:%02d", hr, min % 60, sec % 60);
+        snprintf ( temp, 400, "%02d:%02d:%02d %s\%, %sC", hr, min % 60, sec % 60, str_hum, str_temp);
          
         Serial.print("Tick Occurred: ");
         Serial.println(temp);
-
-        // POST DATA
-        if(remote_posturl.length() <= 0){
+        delay(500);
+        
+      // POST DATA
+      if(remote_posturl.length() <= 0){
           Serial.println("Skipping post, because no url ist set");
         } else {
           int port = atoi(remote_postport.c_str());
@@ -317,7 +383,7 @@ void loop() {
             Serial.println(")");
           }
         }
-        digitalWrite ( led, 0 );
+        //digitalWrite ( led, 0 );
         tickOccured = false;
     }
     yield();
